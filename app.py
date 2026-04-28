@@ -1,103 +1,89 @@
 import streamlit as st
 import pandas as pd
-import folium
-from streamlit_folium import st_folium
+import numpy as np
 import re
-import requests
-from folium.features import DivIcon
 
-# Configuración de página
-st.set_page_config(page_title="Logística Rubiales & CASE - Etapa 2", layout="wide")
-
-# 1. Carga del archivo (Formato limpio: GERENCIA, LOCACION, ESTE, NORTE, POZO)
+# 1. Carga limpia del archivo (Sin Lat/Lon)
 @st.cache_data
 def cargar_base_coordenadas(file_path):
-    # Leemos el CSV directamente (sin saltar filas)
+    # Leemos el archivo directo (Encabezado: GERENCIA, LOCACION, ESTE, NORTE, POZO)
     df = pd.read_csv(file_path, encoding='latin-1')
     
-    # Limpiamos nombres de columnas por si tienen espacios invisibles
+    # Limpiamos nombres de columnas (quitar espacios invisibles)
     df.columns = df.columns.str.strip()
     
-    # Para el mapa, necesitamos Latitud y Longitud. 
-    # Como este archivo tiene ESTE y NORTE (Planas), el código intentará 
-    # usar las columnas de posición 7 y 8 si existen para el mapa.
-    def extraer_valor(row, pos):
-        try: return row.iloc[pos]
-        except: return None
-
-    # Creamos el dataframe de trabajo
-    df_coords = pd.DataFrame()
-    df_coords['pozo'] = df['POZO']
-    df_coords['cluster'] = df['LOCACION']
-    df_coords['este'] = df['ESTE']
-    df_coords['norte'] = df['NORTE']
+    # Seleccionamos y renombramos para facilitar el uso en el resto del código
+    df_coords = df[['POZO', 'LOCACION', 'ESTE', 'NORTE']].copy()
+    df_coords.columns = ['pozo', 'cluster', 'este', 'norte']
     
-    # Intentamos capturar Lat/Lon de las columnas ocultas para Folium
-    # En tu archivo CSV, parecen ser las columnas 7 y 8 (si se exportaron)
-    try:
-        df_coords['lat_dec'] = df.iloc[:, 7] 
-        df_coords['lon_dec'] = df.iloc[:, 8]
-    except:
-        # Si no existen, el mapa no se mostrará, pero la tabla sí.
-        df_coords['lat_dec'] = None
-        df_coords['lon_dec'] = None
+    # Aseguramos que las coordenadas sean números (flotantes)
+    df_coords['este'] = pd.to_numeric(df_coords['este'], errors='coerce')
+    df_coords['norte'] = pd.to_numeric(df_coords['norte'], errors='coerce')
     
-    # Agrupamos por Locación
-    df_final = df_coords.groupby('cluster').agg({
-        'lat_dec': 'first',
-        'lon_dec': 'first',
+    # Agrupamos por Locación (Cluster)
+    return df_coords.dropna(subset=['este', 'norte']).groupby('cluster').agg({
         'este': 'first',
         'norte': 'first',
         'pozo': lambda x: ', '.join(x.astype(str))
     }).reset_index()
-    
-    return df_final
+
+# 2. Cálculo de Distancia Plana (Pitagórica) en metros
+def calcular_distancia_euclidiana(p1, p2):
+    # Distancia = raíz cuadrada de ((E2-E1)² + (N2-N1)²)
+    distancia = np.sqrt((p2['este'] - p1['este'])**2 + (p2['norte'] - p1['norte'])**2)
+    return round(distancia / 1000, 2) # Convertimos a Kilómetros
 
 # --- INTERFAZ ---
-st.title("🚜 Plan de Movilización: Rubiales - Caño Sur Este")
+st.title("🚜 Logística Rubiales & CASE: Análisis de Movilización")
 
 try:
-    # Usamos el nombre exacto del archivo cargado
     df_maestro = cargar_base_coordenadas("COORDENADAS_RUB_CASE.csv")
 
-    st.sidebar.header("Ruta de Movilización")
-    ruta_input = st.sidebar.text_area("Pega las Locaciones:", placeholder="CASE0015\nAGRIO-1")
+    st.sidebar.header("Itinerario de Movilización")
+    ruta_input = st.sidebar.text_area("Pega las Locaciones en orden:", placeholder="CASE0015\nAGRIO-1")
     nombres_ruta = [n.strip().upper() for n in re.split(r'[\n,]+', ruta_input) if n.strip()]
 
     puntos_ruta = []
     for i, nombre in enumerate(nombres_ruta):
-        match = df_maestro[df_maestro['cluster'].astype(str).str.upper() == nombre]
+        match = df_maestro[df_maestro['cluster'].str.upper() == nombre]
         if not match.empty:
             puntos_ruta.append({
                 'orden': i + 1,
                 'nombre': nombre, 
-                'lat': match.iloc[0]['lat_dec'], 
-                'lon': match.iloc[0]['lon_dec'], 
-                'pozos': match.iloc[0]['pozo'],
-                'este': match.iloc[0]['este']
+                'este': match.iloc[0]['este'],
+                'norte': match.iloc[0]['norte'],
+                'pozos': match.iloc[0]['pozo']
             })
 
-    # Si hay coordenadas GPS, mostramos el mapa
-    if not df_maestro['lat_dec'].isnull().all():
-        m = folium.Map(location=[df_maestro['lat_dec'].dropna().mean(), 
-                                 df_maestro['lon_dec'].dropna().mean()], zoom_start=11)
+    if len(puntos_ruta) >= 1:
+        st.write("### 📋 Resumen Logístico de la Ruta")
         
-        for p in puntos_ruta:
-            if pd.notnull(p['lat']):
-                folium.Marker(
-                    location=[p['lat'], p['lon']],
-                    popup=f"Locación: {p['nombre']}\nEste: {p['este']}",
-                    icon=folium.Icon(color='orange', icon='info-sign')
-                ).add_to(m)
+        # Generar tabla de movimientos y distancias
+        resumen_datos = []
+        total_km = 0
         
-        st_folium(m, width=1100, height=600)
+        for i in range(len(puntos_ruta)):
+            p_actual = puntos_ruta[i]
+            dist_tramo = 0
+            
+            if i > 0:
+                p_prev = puntos_ruta[i-1]
+                dist_tramo = calcular_distancia_euclidiana(p_prev, p_actual)
+                total_km += dist_tramo
+            
+            resumen_datos.append({
+                "Orden": p_actual['orden'],
+                "Locación": p_actual['nombre'],
+                "Distancia Tramo (Km)": dist_tramo if i > 0 else "---",
+                "Coordenada Este": p_actual['este'],
+                "Coordenada Norte": p_actual['norte']
+            })
+            
+        st.table(pd.DataFrame(resumen_datos))
+        st.metric("Distancia Total Estimada (Línea Recta)", f"{total_km:.2f} Km")
+        
     else:
-        st.warning("El archivo no contiene columnas de Latitud/Longitud. Mostrando solo tabla de datos.")
-        
-    # Siempre mostramos la tabla de los puntos seleccionados
-    if puntos_ruta:
-        st.write("### Resumen de Coordenadas de la Ruta")
-        st.table(pd.DataFrame(puntos_ruta)[['orden', 'nombre', 'este', 'pozos']])
+        st.info("Ingresa los clústeres en el panel izquierdo para calcular la ruta.")
 
 except Exception as e:
-    st.error(f"Error al leer el archivo: {e}")
+    st.error(f"Error: {e}")
