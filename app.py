@@ -7,76 +7,81 @@ import os
 # Configuración de la página
 st.set_page_config(page_title="Logística Rubiales & CASE", layout="wide")
 
-# 1. Función de Carga con Visor de Verificación
 @st.cache_data
 def cargar_datos(file_name):
+    # 1. Verificación de existencia del archivo
     if not os.path.exists(file_name):
-        return None, f"Archivo '{file_name}' no encontrado."
+        return None, f"❌ Archivo '{file_name}' no encontrado en el repositorio."
     
     try:
-        # Lectura del CSV con encoding estándar para Excel/Spanish
+        # 2. Lectura del CSV (usando latin-1 para evitar errores de tildes/ñ)
         df = pd.read_csv(file_name, encoding='latin-1')
         
-        # Limpieza de nombres de columnas (quitar espacios y pasar a MAYÚSCULAS)
+        # 3. Limpieza y Normalización de columnas
+        # Pasamos todo a mayúsculas y quitamos espacios para que sea fácil buscar
         df.columns = df.columns.astype(str).str.strip().str.upper()
+        cols = df.columns.tolist()
         
-        # Validación de columnas necesarias
-        columnas_requeridas = ['LOCACION', 'ESTE', 'NORTE', 'POZO']
-        columnas_presentes = df.columns.tolist()
+        # Buscamos las columnas que contengan las palabras clave (Flexibilidad total)
+        col_loc = next((c for c in cols if 'LOC' in c), None)
+        col_este = next((c for c in cols if 'ESTE' in c), None)
+        col_norte = next((c for c in cols if 'NORTE' in c), None)
+        col_pozo = next((c for c in cols if 'POZO' in c), None)
         
-        # Verificamos si están todas las necesarias
-        if all(col in columnas_presentes for col in columnas_requeridas):
-            # Limpieza de datos numéricos
-            df['ESTE'] = pd.to_numeric(df['ESTE'], errors='coerce')
-            df['NORTE'] = pd.to_numeric(df['NORTE'], errors='coerce')
+        if all([col_loc, col_este, col_norte, col_pozo]):
+            # Creamos un DataFrame estandarizado
+            df_std = pd.DataFrame()
+            df_std['LOCACION'] = df[col_loc].astype(str).str.strip().str.upper()
+            df_std['ESTE'] = pd.to_numeric(df[col_este], errors='coerce')
+            df_std['NORTE'] = pd.to_numeric(df[col_norte], errors='coerce')
+            df_std['POZO'] = df[col_pozo].astype(str)
             
-            # Agrupación por Locación
-            df_final = df.dropna(subset=['ESTE', 'NORTE']).groupby('LOCACION').agg({
+            # Agrupamos por Locación para tener una sola coordenada por clúster
+            df_final = df_std.dropna(subset=['ESTE', 'NORTE']).groupby('LOCACION').agg({
                 'ESTE': 'first',
                 'NORTE': 'first',
-                'POZO': lambda x: ', '.join(x.astype(str))
+                'POZO': lambda x: ', '.join(x.unique())
             }).reset_index()
             
-            return df_final, f"Cargado exitosamente: {file_name}"
+            return df_final, f"✅ Archivo '{file_name}' cargado correctamente."
         else:
-            return None, f"Error: Columnas faltantes. Encontradas: {columnas_presentes}"
+            return None, f"⚠️ Error en columnas. Encontradas: {cols}. Asegúrate de que existan LOCACION, ESTE, NORTE y POZO."
             
     except Exception as e:
-        return None, f"Error al leer el archivo: {e}"
+        return None, f"❌ Error al procesar: {str(e)}"
 
-# 2. Cálculo de Distancia Euclidiana (Metros a Kilómetros)
 def calcular_distancia(p1, p2):
     dist = np.sqrt((p2['ESTE'] - p1['ESTE'])**2 + (p2['NORTE'] - p1['NORTE'])**2)
     return round(dist / 1000, 2)
 
-# --- INTERFAZ DE USUARIO ---
+# --- INTERFAZ ---
 
-st.title("🚜 Logística: Visor de Movilización Rubiales & CASE")
+st.title("🚜 Sistema Logístico de Movilización")
 
-# Lógica de carga
-archivo_objetivo = "datam.csv"
-df_maestro, mensaje_estado = cargar_datos(archivo_objetivo)
+# Nombre exacto según tu imagen 2 de GitHub
+nombre_archivo = "datam.csv" 
+df_maestro, estado = cargar_datos(nombre_archivo)
 
-# Visor de estado en la barra lateral
-st.sidebar.header("📁 Estado del Archivo")
+# Visor de estado
+st.sidebar.header("📁 Estado de Datos")
 if df_maestro is not None:
-    st.sidebar.success(mensaje_estado)
-    st.sidebar.write(f"**Registros (Locaciones):** {len(df_maestro)}")
+    st.sidebar.success(estado)
+    st.sidebar.info(f"Locaciones disponibles: {len(df_maestro)}")
 else:
-    st.sidebar.error(mensaje_estado)
-    st.stop() # Detiene la ejecución si no hay datos
+    st.sidebar.error(estado)
+    st.stop()
 
 # Entrada de Ruta
-st.sidebar.header("📍 Planificación de Ruta")
-input_ruta = st.sidebar.text_area("Lista de Locaciones (una por línea):", 
-                                 placeholder="CASE0015\nAGRIO-1\nRB-162")
+st.sidebar.header("📍 Plan de Ruta")
+input_ruta = st.sidebar.text_area("Ingresa las Locaciones (una por línea):", 
+                                 placeholder="CASE0015\nAGRIO-1\nCASE0019")
 
 if input_ruta:
-    nombres_solicitados = [n.strip().upper() for n in re.split(r'[\n,]+', input_ruta) if n.strip()]
-    
+    nombres_busqueda = [n.strip().upper() for n in re.split(r'[\n,]+', input_ruta) if n.strip()]
     puntos_ruta = []
-    for i, nombre in enumerate(nombres_solicitados):
-        match = df_maestro[df_maestro['LOCACION'].str.upper() == nombre]
+    
+    for i, nombre in enumerate(nombres_busqueda):
+        match = df_maestro[df_maestro['LOCACION'] == nombre]
         if not match.empty:
             puntos_ruta.append({
                 'Orden': i + 1,
@@ -86,40 +91,35 @@ if input_ruta:
                 'Pozos': match.iloc[0]['POZO']
             })
         else:
-            st.sidebar.warning(f"⚠️ No se encontró: {nombre}")
+            st.sidebar.warning(f"No encontrada: {nombre}")
 
-    # Mostrar Resultados
     if puntos_ruta:
-        st.write("### 📋 Itinerario y Coordenadas Planas")
+        st.write("### 📊 Itinerario de Coordenadas Planas")
         
         datos_tabla = []
         total_km = 0
         
         for i in range(len(puntos_ruta)):
-            p_actual = puntos_ruta[i]
-            dist_tramo = 0
-            
+            p = puntos_ruta[i]
+            dist = 0
             if i > 0:
-                dist_tramo = calcular_distancia(puntos_ruta[i-1], p_actual)
-                total_km += dist_tramo
+                dist = calcular_distancia(puntos_ruta[i-1], p)
+                total_km += dist
             
             datos_tabla.append({
-                "Orden": p_actual['Orden'],
-                "Locación": p_actual['Locacion'],
-                "Este (X)": f"{p_actual['ESTE']:,}",
-                "Norte (Y)": f"{p_actual['NORTE']:,}",
-                "Dist. Tramo (Km)": dist_tramo if i > 0 else "---",
-                "Pozos Asociados": p_actual['Pozos']
+                "Secuencia": p['Orden'],
+                "Locación": p['Locacion'],
+                "Coordenada X (Este)": f"{p['ESTE']:,.2f}",
+                "Coordenada Y (Norte)": f"{p['NORTE']:,.2f}",
+                "KM Tramo": dist if i > 0 else "Punto de Partida",
+                "Pozos": p['Pozos']
             })
-            
-        st.table(pd.DataFrame(datos_tabla))
         
-        col1, col2 = st.columns(2)
-        col1.metric("Distancia Total de la Campaña", f"{total_km:.2f} Km")
-        col2.info("Nota: Los cálculos se basan en distancia euclidiana entre coordenadas planas.")
+        st.table(pd.DataFrame(datos_tabla))
+        st.metric("Distancia Total Estimada", f"{total_km:.2f} Km")
 else:
-    st.info("💡 Por favor, ingresa los nombres de las locaciones en el panel de la izquierda para comenzar.")
+    st.info("Escribe los nombres de los clústeres en la izquierda para generar la tabla de coordenadas.")
 
-# Opcional: Ver toda la base de datos cargada
-if st.checkbox("Ver base de datos completa de coordenadas"):
+# Ver base completa por si acaso
+if st.checkbox("Mostrar base de datos cargada"):
     st.dataframe(df_maestro)
