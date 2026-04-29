@@ -8,54 +8,60 @@ from folium.features import DivIcon
 from pyproj import Transformer
 import os
 
-# 1. Configuración
-st.set_page_config(page_title="Logística Rubiales v2.3", layout="wide")
-st.title("🚜 Plan Logístico Rubiales v2.3")
-st.caption("Coordenadas Origen Nacional (EPSG:9377)")
+st.set_page_config(page_title="Logística Rubiales v2.4", layout="wide")
+st.title("🚜 Plan Logístico Rubiales v2.4")
 
-# 2. Función de Transformación
 def proyectadas_a_latlon(este, norte):
     try:
-        # Transformador de Origen Nacional (9377) a Global (4326)
+        # Origen Nacional Colombia EPSG:9377
         transformer = Transformer.from_crs("EPSG:9377", "EPSG:4326", always_xy=True)
-        lon, lat = transformer.transform(este, norte)
+        lon, lat = transformer.transform(float(este), float(norte))
         return lat, lon
-    except Exception:
+    except:
         return None, None
 
-# 3. Carga de Datos (Simplificada y sin 'NoneType' errors)
+def limpiar_numero_colombiano(valor):
+    """Convierte '5.147.414,36' a 5147414.36"""
+    if pd.isna(valor): return None
+    s = str(valor).strip()
+    s = s.replace('.', '')  # Quita puntos de miles
+    s = s.replace(',', '.')  # Cambia coma decimal por punto
+    try:
+        return float(s)
+    except:
+        return None
+
 @st.cache_data
 def cargar_base():
     path = "COORDENADAS_GOR.xlsx - data.csv"
-    
     if not os.path.exists(path):
-        st.error(f"Falta el archivo: {path}")
-        return pd.DataFrame() # Retorna tabla vacía, no None
+        return pd.DataFrame()
 
     try:
-        # Leemos el archivo forzando el separador por si acaso
         df = pd.read_csv(path, encoding='latin-1', sep=None, engine='python')
-        
-        # Limpieza de nombres de columnas
         df.columns = [str(c).strip().upper() for c in df.columns]
         
-        # Mapeo manual por posición para evitar errores de nombres
-        # 1:CLUSTER, 2:POZO, 3:ESTE, 4:NORTE
+        # Extraer columnas por posición (1:CLUSTER, 3:ESTE, 4:NORTE)
         df_coords = df.iloc[:, [1, 2, 3, 4]].copy()
         df_coords.columns = ['CLUSTER', 'POZO', 'ESTE', 'NORTE']
         
-        # Convertir a números y limpiar
-        df_coords['ESTE'] = pd.to_numeric(df_coords['ESTE'], errors='coerce')
-        df_coords['NORTE'] = pd.to_numeric(df_coords['NORTE'], errors='coerce')
-        df_coords = df_coords.dropna(subset=['ESTE', 'NORTE'])
+        # --- LIMPIEZA CRÍTICA ---
+        df_coords['ESTE_LIMPIO'] = df_coords['ESTE'].apply(limpiar_numero_colombiano)
+        df_coords['NORTE_LIMPIO'] = df_coords['NORTE'].apply(limpiar_numero_colombiano)
         
-        # Transformar a Lat/Lon
-        # Si pyproj falla, estas columnas serán None
-        results = df_coords.apply(lambda r: proyectadas_a_latlon(r['ESTE'], r['NORTE']), axis=1)
-        df_coords['lat_dec'] = [r[0] for r in results]
-        df_coords['lon_dec'] = [r[1] for r in results]
+        df_coords = df_coords.dropna(subset=['ESTE_LIMPIO', 'NORTE_LIMPIO'])
         
-        # Agrupar
+        # Transformación
+        lats, lons = [], []
+        for _, row in df_coords.iterrows():
+            lat, lon = proyectadas_a_latlon(row['ESTE_LIMPIO'], row['NORTE_LIMPIO'])
+            lats.append(lat)
+            lons.append(lon)
+        
+        df_coords['lat_dec'] = lats
+        df_coords['lon_dec'] = lons
+        
+        # Agrupar por Clúster para el mapa
         df_final = df_coords.dropna(subset=['lat_dec']).groupby('CLUSTER').agg({
             'lat_dec': 'first', 
             'lon_dec': 'first', 
@@ -64,18 +70,15 @@ def cargar_base():
         
         return df_final
     except Exception as e:
-        st.error(f"Error procesando CSV: {e}")
+        st.error(f"Error técnico: {e}")
         return pd.DataFrame()
 
-# --- LÓGICA PRINCIPAL ---
-
+# --- INTERFAZ ---
 df_maestro = cargar_base()
 
 if not df_maestro.empty:
-    st.sidebar.success(f"Base cargada: {len(df_maestro)} clústeres.")
-    
-    # Input de Usuario
-    txt_input = st.sidebar.text_area("Lista de Clústeres (uno por línea):", "AGRIO-1\nCASE0015")
+    st.sidebar.success(f"Base lista: {len(df_maestro)} clústeres")
+    txt_input = st.sidebar.text_area("Ruta (Clústeres):", "AGRIO-1\nCASE0015")
     nombres = [n.strip().upper() for n in re.split(r'[\n,]+', txt_input) if n.strip()]
 
     puntos_ruta = []
@@ -84,44 +87,28 @@ if not df_maestro.empty:
         if not match.empty:
             puntos_ruta.append({
                 'id': i+1, 'nombre': nombre, 
-                'lat': match.iloc[0]['lat_dec'], 'lon': match.iloc[0]['lon_dec'],
-                'pozos': match.iloc[0]['POZO']
+                'lat': match.iloc[0]['lat_dec'], 'lon': match.iloc[0]['lon_dec']
             })
-        else:
-            if nombre: st.sidebar.warning(f"No hallado: {nombre}")
 
-    # Mapa
-    m = folium.Map(location=[df_maestro['lat_dec'].mean(), df_maestro['lon_dec'].mean()], zoom_start=12)
+    # Centro del mapa en Rubiales
+    m = folium.Map(location=[4.0, -72.0], zoom_start=10) 
+    if not df_maestro.empty:
+        m.location = [df_maestro['lat_dec'].mean(), df_maestro['lon_dec'].mean()]
 
-    # Dibujar Ruta y Marcadores
-    if len(puntos_ruta) >= 2:
-        distancia_total = 0
-        for j in range(len(puntos_ruta)-1):
-            p1, p2 = puntos_ruta[j], puntos_ruta[j+1]
-            url = f"http://router.project-osrm.org/route/v1/driving/{p1['lon']},{p1['lat']};{p2['lon']},{p2['lat']}?overview=full&geometries=geojson"
-            try:
-                r = requests.get(url).json()
-                if r['code'] == 'Ok':
-                    geom = [[c[1], c[0]] for c in r['routes'][0]['geometry']['coordinates']]
-                    distancia_total += r['routes'][0]['distance'] / 1000
-                    folium.PolyLine(geom, color="#2c3e50", weight=5).add_to(m)
-            except: pass
-        st.sidebar.metric("Distancia Total", f"{distancia_total:.2f} Km")
-
+    # Dibujar
     for p in puntos_ruta:
         folium.Marker(
             [p['lat'], p['lon']], 
-            popup=p['nombre'],
-            icon=folium.Icon(color='red', icon='info-sign')
+            tooltip=p['nombre'],
+            icon=folium.Icon(color='red', icon='truck', prefix='fa')
         ).add_to(m)
         
-        # Etiqueta con el número de orden
         folium.map.Marker(
             [p['lat'], p['lon']],
-            icon=DivIcon(icon_size=(20,20), icon_anchor=(10,40),
-            html=f'<div style="font-size: 12pt; color: white; background: #e74c3c; border-radius: 5px; padding: 2px 5px; font-weight: bold;">{p["id"]}</div>')
+            icon=DivIcon(icon_size=(20,20), icon_anchor=(-10,20),
+            html=f'<div style="font-size: 10pt; color: black; background: white; border: 2px solid red; border-radius: 50%; width: 25px; height: 25px; display: flex; align-items: center; justify-content: center; font-weight: bold;">{p["id"]}</div>')
         ).add_to(m)
 
-    st_folium(m, width=1200, height=600)
+    st_folium(m, width=1000, height=500)
 else:
-    st.info("Sube el archivo CSV o revisa que los nombres de las columnas coincidan.")
+    st.warning("No se pudieron procesar las coordenadas. Verifica el formato del CSV.")
