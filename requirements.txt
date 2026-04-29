@@ -3,5 +3,4 @@ pandas
 folium
 streamlit-folium
 openpyxl
-pip
 pyproj
