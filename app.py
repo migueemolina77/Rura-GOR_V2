@@ -7,20 +7,28 @@ import requests
 import math
 from folium.features import DivIcon
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="LOGÍSTICA ENFOCADA V6.8", layout="wide", page_icon="🦎")
+# --- CONFIGURACIÓN DE PÁGINA Y ESTILO RECUPERADO ---
+st.set_page_config(page_title="LOGÍSTICA RUBIALES V6.9", layout="wide", page_icon="🦎")
 
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; }
+    /* Estilo para las tarjetas de tramos laterales */
     .tramo-card {
-        margin-bottom: 12px; padding: 14px; background: #161b22; 
-        border-radius: 10px; border-left: 6px solid; border: 1px solid #30363d;
+        margin-bottom: 15px; padding: 18px; background: #1c2128; 
+        border-radius: 12px; border-left: 8px solid; border: 1px solid #30363d;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
     }
+    .tramo-nombres { color: #adbac7; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 5px;}
+    .tramo-puntos { color: #ffffff; font-size: 1.1rem; font-weight: 700; margin-bottom: 8px; display: block;}
+    .tramo-distancia { font-size: 1.4rem; font-weight: 900; }
+    
+    /* Personalización de inputs */
+    .stTextArea textarea { background-color: #0d1117 !important; color: #58a6ff !important; border: 1px solid #30363d !important;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- MOTOR DE COORDENADAS ---
+# --- MOTOR DE COORDENADAS (Magna-SIRGAS) ---
 def proyectadas_a_latlon_colombia(este, norte):
     try:
         a, f = 6378137.0, 1 / 298.257222101
@@ -42,7 +50,7 @@ def proyectadas_a_latlon_colombia(este, norte):
     except: return None, None
 
 def obtener_ruta_forzada(p1, p2):
-    url = f"http://router.project-osrm.org/route/v1/driving/{p1['lon']},{p1['lat']};{p2['lon']},{p2['lat']}?overview=full&geometries=geojson"
+    url = f"http://router.project-osrm.org/route/v1/driving/{p1['lon']},{p1['lat']};{p2['lon']},{p2['lat']}?overview=full&geometries=geojson&continue_straight=true"
     try:
         r = requests.get(url, timeout=5).json()
         if r['code'] == 'Ok':
@@ -68,16 +76,18 @@ def cargar_db(file):
         return df_f.dropna(subset=['lat'])
     except: return pd.DataFrame()
 
-# --- INTERFAZ ---
-st.markdown("<h2 style='text-align: center;'>🗺️ Visualizador Logístico de Precisión</h2>", unsafe_allow_html=True)
-archivo = st.file_uploader("📂 Subir Excel de Coordenadas:", type=["xlsx", "csv"])
+# --- INTERFAZ RECUPERADA ---
+st.markdown("<h1 style='text-align: left; color: #ffffff; font-family: sans-serif;'>🚜 LOGÍSTICA RUBIALES</h1>", unsafe_allow_html=True)
+
+archivo = st.file_uploader("Cargar Base de Coordenadas (XLSX/CSV):", label_visibility="collapsed")
 
 if archivo:
     db = cargar_db(archivo)
-    col_ui, col_map = st.columns([1, 2.8])
+    col_ui, col_map = st.columns([1, 2.5], gap="medium")
     
     with col_ui:
-        entrada = st.text_area("Escribe los Pozos (Ej: CASE0015):", height=150)
+        st.markdown("### 📍 Orden del Recorrido")
+        entrada = st.text_area("Pega los pozos aquí (uno por línea):", height=150, placeholder="CLUSTER-33\nCASE0021...")
         lista_nombres = [n.strip().upper() for n in re.split(r'[\n,]+', entrada) if n.strip()]
         
         puntos_seleccionados = []
@@ -89,30 +99,53 @@ if archivo:
                 puntos_seleccionados.append({'id': i+1, 'n': row['NAME'], 'lat': row['lat'], 'lon': row['lon']})
 
         if len(puntos_seleccionados) >= 2:
+            st.divider()
+            km_totales = 0
             all_coords_for_zoom = []
-            colores = ["#00FFCC", "#FF007F", "#FFD700", "#00BFFF"]
+            colores = ["#00FFCC", "#FF007F", "#FFD700", "#00BFFF", "#7CFC00"]
             
             for i in range(len(puntos_seleccionados)-1):
                 geom, km = obtener_ruta_forzada(puntos_seleccionados[i], puntos_seleccionados[i+1])
+                km_totales += km
                 all_coords_for_zoom.extend(geom)
                 c = colores[i % len(colores)]
-                st.markdown(f'<div class="tramo-card" style="border-left-color: {c};"><b>Tramo {i+1}:</b> {km:.2f} KM</div>', unsafe_allow_html=True)
+                
+                # Restauración de la tarjeta visual por tramo
+                st.markdown(f"""
+                <div class="tramo-card" style="border-left-color: {c};">
+                    <div class="tramo-nombres">Tramo {i+1}</div>
+                    <span class="tramo-puntos">{puntos_seleccionados[i]['n']} ➔ {puntos_seleccionados[i+1]['n']}</span>
+                    <span class="tramo-distancia" style="color:{c};">{km:.2f} KM</span>
+                </div>""", unsafe_allow_html=True)
+            
+            st.markdown(f"""
+            <div style="background: #238636; padding: 15px; border-radius: 10px; text-align: center; margin-top: 20px;">
+                <span style="color: white; font-size: 0.9rem; font-weight: bold; text-transform: uppercase;">Distancia Total</span><br>
+                <span style="color: white; font-size: 2.2rem; font-weight: 900;">{km_totales:.2f} km</span>
+            </div>""", unsafe_allow_html=True)
 
     with col_map:
         if len(puntos_seleccionados) >= 2:
             m = folium.Map(tiles=None)
-            folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Híbrido').add_to(m)
+            folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite').add_to(m)
             
             for i in range(len(puntos_seleccionados)-1):
                 geom, _ = obtener_ruta_forzada(puntos_seleccionados[i], puntos_seleccionados[i+1])
-                folium.PolyLine(geom, color=colores[i % len(colores)], weight=5, opacity=0.8).add_to(m)
+                color_linea = colores[i % len(colores)]
+                # Efecto de brillo para la ruta
+                folium.PolyLine(geom, color='white', weight=8, opacity=0.2).add_to(m)
+                folium.PolyLine(geom, color=color_linea, weight=4, opacity=0.85).add_to(m)
             
             for p in puntos_seleccionados:
-                folium.Marker([p['lat'], p['lon']], tooltip=p['n']).add_to(m)
+                c = colores[(p['id']-1) % len(colores)]
+                # Marcadores numéricos profesionales
+                lbl = f"""<div style="background:{c}; color:black; border-radius:50%; width:28px; height:28px; line-height:28px; text-align:center; font-weight:bold; border:2px solid white; box-shadow: 0 0 10px rgba(0,0,0,0.5);">{p['id']}</div>"""
+                folium.Marker([p['lat'], p['lon']], icon=DivIcon(html=lbl, icon_anchor=(14,14)), tooltip=p['n']).add_to(m)
             
-            # EL TRUCO: Solo ajustamos el zoom a los puntos que recolectamos arriba
+            # EL CORAZÓN DE TU SOLICITUD: Solo ajusta a los puntos de la búsqueda actual
             if all_coords_for_zoom:
-                m.fit_bounds([[min(p[0] for p in all_coords_for_zoom), min(p[1] for p in all_coords_for_zoom)],
-                             [max(p[0] for p in all_coords_for_zoom), max(p[1] for p in all_coords_for_zoom)]])
+                sw = [min(p[0] for p in all_coords_for_zoom), min(p[1] for p in all_coords_for_zoom)]
+                ne = [max(p[0] for p in all_coords_for_zoom), max(p[1] for p in all_coords_for_zoom)]
+                m.fit_bounds([sw, ne])
             
-            st_folium(m, width="100%", height=650)
+            st_folium(m, width="100%", height=750)
