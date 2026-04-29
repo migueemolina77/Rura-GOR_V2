@@ -3,3 +3,5 @@ pandas
 folium
 streamlit-folium
 openpyxl
+pip
+install pyproj
