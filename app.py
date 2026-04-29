@@ -7,102 +7,128 @@ import math
 import os
 from folium.features import DivIcon
 
-st.set_page_config(page_title="Logística Rubiales v3.8", layout="wide")
-st.title("🚜 Sistema Logístico Rubiales v3.8 (Soporte Excel)")
+st.set_page_config(page_title="Logística Rubiales v3.9", layout="wide")
+st.title("🚜 Precisión Magna-SIRGAS: Logística Rubiales")
 
-def proyectadas_a_latlon_manual(este, norte):
+# --- MOTOR DE GEORREFERENCIACIÓN MAGNA-SIRGAS (EPSG:9377) ---
+def proyectadas_a_latlon_magna(este, norte):
+    """
+    Conversión de Origen Nacional (9377) a WGS84.
+    Parámetros oficiales del IGAC para Colombia.
+    """
     try:
-        lat_0, lon_0 = 4.0, -73.0
-        f_este, f_norte = 5000000.0, 2000000.0
-        scale, r_earth = 0.9992, 6378137.0
-        d_norte = (norte - f_norte) / scale
-        d_este = (este - f_este) / scale
-        lat = lat_0 + (d_norte / r_earth) * (180.0 / math.pi)
-        lon = lon_0 + (d_este / (r_earth * math.cos(math.radians(lat_0)))) * (180.0 / math.pi)
-        return lat, lon
-    except: return None, None
+        # Constantes del elipsoide GRS80 / WGS84
+        a = 6378137.0
+        f = 1 / 298.257222101
+        b = a * (1 - f)
+        e2 = (a**2 - b**2) / a**2
+        ep2 = (a**2 - b**2) / b**2
+        
+        # Parámetros del Origen Nacional (EPSG:9377)
+        lat0 = 4.0 * math.pi / 180.0
+        lon0 = -73.0 * math.pi / 180.0
+        k0 = 0.9992
+        FE = 5000000.0
+        FN = 2000000.0
+        
+        # Cálculos de proyección inversa
+        M0 = a * ((1 - e2/4 - 3*e2**2/64 - 5*e2**3/256)*lat0 - (3*e2/8 + 3*e2**2/32 + 45*e2**3/1024)*math.sin(2*lat0) + (15*e2**2/256 + 45*e2**3/1024)*math.sin(4*lat0) - (35*e2**3/3072)*math.sin(6*lat0))
+        M = M0 + (norte - FN) / k0
+        
+        mu = M / (a * (1 - e2/4 - 3*e2**2/64 - 5*e2**3/256))
+        e1 = (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
+        
+        phi1 = mu + (3*e1/2 - 27*e1**3/32)*math.sin(2*mu) + (21*e1**2/16 - 55*e1**4/32)*math.sin(4*mu) + (151*e1**3/96)*math.sin(6*mu)
+        
+        N1 = a / math.sqrt(1 - e2 * math.sin(phi1)**2)
+        R1 = a * (1 - e2) / (1 - e2 * math.sin(phi1)**2)**1.5
+        D = (este - FE) / (N1 * k0)
+        
+        lat = phi1 - (N1 * math.tan(phi1) / R1) * (D**2/2 - (5 + 3*math.tan(phi1)**2 + 10*math.tan(phi1)**2 - 4*math.tan(phi1)**4 - 9*ep2)*D**4/24)
+        lon = lon0 + (D - (1 + 2*math.tan(phi1)**2 + ep2)*D**3/6 + (5 - 2*math.tan(phi1)**2 + 28*math.tan(phi1)**2 - 3*ep2**2 + 8*math.tan(phi1)**4 + 24*math.tan(phi1)**4)*D**5/120) / math.cos(phi1)
+        
+        return lat * 180.0 / math.pi, lon * 180.0 / math.pi
+    except:
+        return None, None
 
 @st.cache_data
-def procesar_datos_universal(file_source, is_excel=False):
+def cargar_datos_eco(file_source):
     try:
-        # LEER SEGÚN EL TIPO DE ARCHIVO
-        if is_excel or str(file_source).endswith('.xlsx'):
+        # Detección de Excel o CSV
+        if hasattr(file_source, 'name') and file_source.name.endswith('.xlsx'):
+            df = pd.read_excel(file_source)
+        elif str(file_source).endswith('.xlsx'):
             df = pd.read_excel(file_source)
         else:
             df = pd.read_csv(file_source, encoding='latin-1', sep=None, engine='python')
         
-        # Limpiar encabezados: Solo letras y en Mayúsculas
+        # Limpieza de columnas
         df.columns = [re.sub(r'[^a-zA-Z]', '', str(c)).upper() for c in df.columns]
-        
-        # Buscar columnas clave (CLUSTER, ESTE, NORTE)
-        col_c = next((c for c in df.columns if 'CLUSTER' in c), None)
-        col_e = next((c for c in df.columns if 'ESTE' in c), None)
-        col_n = next((c for c in df.columns if 'NORTE' in c), None)
+        c_name = next((c for c in df.columns if 'CLUSTER' in c), None)
+        c_este = next((c for c in df.columns if 'ESTE' in c), None)
+        c_norte = next((c for c in df.columns if 'NORTE' in c), None)
 
-        if not all([col_c, col_e, col_n]):
-            st.error(f"⚠️ No encontré las columnas necesarias. El archivo tiene: {list(df.columns)}")
-            return pd.DataFrame()
-
-        df_f = df[[col_c, col_e, col_n]].copy()
+        df_f = df[[c_name, c_este, c_norte]].copy()
         df_f.columns = ['NAME', 'E', 'N']
         
-        # Limpiar números (quitar espacios o puntos de miles)
+        # Limpiar números
         for c in ['E', 'N']:
             df_f[c] = pd.to_numeric(df_f[c].astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce')
         
         df_f = df_f.dropna()
-
-        # Conversión de coordenadas
-        coords = df_f.apply(lambda r: proyectadas_a_latlon_manual(r['E'], r['N']), axis=1)
-        df_f['lat'] = [c[0] for c in coords]
-        df_f['lon'] = [c[1] for c in coords]
+        
+        # Aplicar conversión Magna-SIRGAS
+        res = df_f.apply(lambda r: proyectadas_a_latlon_magna(r['E'], r['N']), axis=1)
+        df_f['lat'] = [r[0] for r in res]
+        df_f['lon'] = [r[1] for r in res]
         df_f['KEY'] = df_f['NAME'].astype(str).str.replace(r'[^a-zA-Z0-9]', '', regex=True).str.upper()
         
         return df_f.dropna(subset=['lat']).groupby('NAME').first().reset_index()
     except Exception as e:
-        st.error(f"Error procesando el archivo: {e}")
+        st.error(f"Error: {e}")
         return pd.DataFrame()
 
-# --- CARGA DE ARCHIVOS ---
-st.sidebar.header("📂 Carga de Coordenadas")
-file = st.sidebar.file_uploader("Sube tu Excel o CSV aquí:", type=["csv", "xlsx"])
+# --- INTERFAZ ---
+file = st.sidebar.file_uploader("Cargar Coordenadas (Excel/CSV):", type=["csv", "xlsx"])
+path_repo = "COORDENADAS_GOR.xlsx"
 
-df_maestro = pd.DataFrame()
-if file:
-    is_xlsx = file.name.endswith('.xlsx')
-    df_maestro = procesar_datos_universal(file, is_excel=is_xlsx)
-else:
-    # Intento de carga automática del archivo en el repo
-    for p in ["COORDENADAS_GOR.xlsx", "COORDENADAS_GOR.xlsx - data.csv"]:
-        if os.path.exists(p):
-            df_maestro = procesar_datos_universal(p, is_excel=p.endswith('.xlsx'))
-            break
+df = pd.DataFrame()
+if file: df = cargar_datos_eco(file)
+elif os.path.exists(path_repo): df = cargar_datos_eco(path_repo)
 
-# --- MAPA ---
 puntos = []
-if not df_maestro.empty:
-    st.sidebar.success(f"✅ {len(df_maestro)} Clústeres detectados")
-    busqueda = st.sidebar.text_area("Ruta (Nombres de pozos):", "AGRIO-1")
-    
+if not df.empty:
+    st.sidebar.success(f"Sistema Magna-SIRGAS Activo")
+    busqueda = st.sidebar.text_area("Ruta de Trabajo:", "")
     nombres_in = [n.strip().upper() for n in re.split(r'[\n,]+', busqueda) if n.strip()]
+    
     for i, n in enumerate(nombres_in):
         k = re.sub(r'[^a-zA-Z0-9]', '', n)
-        match = df_maestro[df_maestro['KEY'] == k]
+        match = df[df['KEY'] == k]
         if not match.empty:
             puntos.append({'id': i+1, 'n': match.iloc[0]['NAME'], 'lat': match.iloc[0]['lat'], 'lon': match.iloc[0]['lon'], 'color': 'red'})
-
-    if not puntos: # Si no hay búsqueda, mostrar algunos de prueba
-        for i, row in df_maestro.head(5).iterrows():
+    
+    # Si no hay búsqueda, mostrar los primeros para validar centrado
+    if not puntos:
+        for i, row in df.head(8).iterrows():
             puntos.append({'id': '•', 'n': row['NAME'], 'lat': row['lat'], 'lon': row['lon'], 'color': 'blue'})
 
-m = folium.Map(location=[3.99, -71.73], zoom_start=11)
+# --- MAPA CON CAPA SATELITAL ---
+c_lat, c_lon = (puntos[0]['lat'], puntos[0]['lon']) if puntos else (3.99, -71.73)
+m = folium.Map(location=[c_lat, c_lon], zoom_start=13)
+
+# Añadimos vista de Satélite para que veas las locaciones reales
+folium.TileLayer(
+    tiles = 'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+    attr = 'Google',
+    name = 'Satélite',
+    overlay = False,
+    control = True
+).add_to(m)
+
 for p in puntos:
     folium.Marker([p['lat'], p['lon']], tooltip=p['n'], icon=folium.Icon(color=p['color'])).add_to(m)
     folium.map.Marker([p['lat'], p['lon']], icon=DivIcon(icon_size=(20,20), icon_anchor=(-15,20),
-        html=f'<div style="font-size: 9pt; color: white; background: {p["color"]}; border-radius: 4px; padding: 2px 5px; font-weight: bold; border: 1px solid white;">{p["n"]}</div>')).add_to(m)
+        html=f'<div style="font-size: 8pt; color: white; background: {p["color"]}; border-radius: 4px; padding: 1px 4px; font-weight: bold; border: 1px solid white; white-space: nowrap;">{p["n"]}</div>')).add_to(m)
 
-st_folium(m, width=1100, height=600, key="mapa_v38")
-
-if not df_maestro.empty:
-    with st.expander("📖 Ver lista de clústeres en el archivo"):
-        st.write(", ".join(df_maestro['NAME'].tolist()))
+st_folium(m, width=1100, height=600, key="mapa_magna")
