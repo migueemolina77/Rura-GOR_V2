@@ -7,15 +7,15 @@ import requests
 import math
 from folium.features import DivIcon
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="MAPA GOR - OPERACIONES", layout="wide", page_icon="🦎")
+# --- CONFIGURACIÓN ESTÉTICA ---
+st.set_page_config(page_title="LOGÍSTICA RUBIALES V7.2", layout="wide", page_icon="🦎")
 
-# Estilo CSS - Manteniendo la estética "Reloj Suizo" con nuevas alertas
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; }
-    h1 { color: #ffffff; font-family: 'Segoe UI', sans-serif; font-weight: 800; letter-spacing: -1px; }
+    h1 { color: #ffffff; font-family: 'Segoe UI', sans-serif; font-weight: 800; letter-spacing: -1px; margin-bottom: 0px; }
     
+    /* Tarjetas de tramo (Estilo Reloj Suizo) */
     .tramo-card {
         margin-bottom: 12px; padding: 15px; background: #161b22; 
         border-radius: 10px; border-left: 6px solid; border: 1px solid #30363d;
@@ -24,28 +24,29 @@ st.markdown("""
     .tramo-nombres { color: #ffffff; font-size: 1rem; font-weight: 600; }
     .tramo-distancia { font-size: 1.3rem; font-weight: 800; margin-top: 5px; display: block; }
     
-    /* Estilo para Alertas Operativas */
-    .alerta-seguridad {
-        padding: 10px; border-radius: 8px; font-size: 0.85rem; margin-top: 10px;
-        display: flex; align-items: center; gap: 8px;
+    /* Alertas Operativas */
+    .alerta-box {
+        padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; font-weight: bold; margin-top: 8px;
+        display: flex; align-items: center; gap: 6px;
     }
-    .alerta-distancia { background-color: rgba(255, 75, 75, 0.15); color: #ff4b4b; border: 1px solid #ff4b4b; }
-    .alerta-cacerio { background-color: rgba(255, 165, 0, 0.15); color: #ffa500; border: 1px solid #ffa500; }
+    .alerta-despine { background: rgba(255, 75, 75, 0.1); color: #ff4b4b; border: 1px solid #ff4b4b; }
+    .alerta-comunidad { background: rgba(255, 184, 0, 0.1); color: #ffb800; border: 1px solid #ffb800; }
 </style>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 """, unsafe_allow_html=True)
 
-# --- COORDENADAS DE REFERENCIA (CACERÍOS) ---
-CACERIOS = {
-    "EL OASIS": {"lat": 3.966, "lon": -71.896}, # Coordenadas aproximadas para monitoreo
+# --- COORDENADAS DE REFERENCIA (COMUNIDADES) ---
+COMUNIDADES = {
+    "EL OASIS": {"lat": 3.966, "lon": -71.896},
     "RUBIALITOS": {"lat": 3.912, "lon": -72.035}
 }
 
 # --- FUNCIONES TÉCNICAS ---
-def haversine_dist(lat1, lon1, lat2, lon2):
+def haversine(lat1, lon1, lat2, lon2):
     R = 6371
-    dlat, dlon = math.radians(lat2-lat1), math.radians(lon2-lon1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi, dlambda = math.radians(lat2-lat1), math.radians(lon2-lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
 def proyectadas_a_latlon_colombia(este, norte):
@@ -68,7 +69,7 @@ def proyectadas_a_latlon_colombia(este, norte):
         return math.degrees(lat), math.degrees(lon)
     except: return None, None
 
-def obtener_ruta_mejorada(p1, p2):
+def obtener_ruta_osrm(p1, p2):
     url = f"http://router.project-osrm.org/route/v1/driving/{p1['lon']},{p1['lat']};{p2['lon']},{p2['lat']}?overview=full&geometries=geojson"
     try:
         r = requests.get(url, timeout=5).json()
@@ -95,19 +96,21 @@ def cargar_maestro(file):
         return df_f.dropna(subset=['lat'])
     except: return pd.DataFrame()
 
-# --- INTERFAZ ---
-st.markdown("<h1 style='text-align: center;'>🦎 MAPA GOR - OPERACIONES RUBIALES</h1>", unsafe_allow_html=True)
+# --- TÍTULOS Y CABEZOTE ACORDADO ---
+st.markdown("<h1 style='text-align: center;'>🦎 MAPA GOR - ECOPETROL</h1>", unsafe_allow_html=True)
 st.divider()
 
-archivo = st.file_uploader("📂 Cargue el archivo maestro:", type=["xlsx", "csv"], label_visibility="collapsed")
+archivo = st.file_uploader("📂 Por favor, cargue el archivo maestro de coordenadas:", type=["xlsx", "csv"])
 
-if archivo:
+if not archivo:
+    st.info("👋 **Bienvenido.** Por favor, carga el archivo maestro para iniciar la planificación.")
+else:
     db = cargar_maestro(archivo)
-    col_ui, col_map = st.columns([1.2, 3])
+    col_ui, col_map = st.columns([1.1, 3])
     
     with col_ui:
-        st.subheader("Planificación de Pozos")
-        entrada = st.text_area("Orden de Pozos:", height=150)
+        st.subheader("Plan de Ruta")
+        entrada = st.text_area("Lista de Pozos:", placeholder="Ej: CLUSTER-34\nCASE0092", height=150)
         nombres = [n.strip().upper() for n in re.split(r'[\n,]+', entrada) if n.strip()]
         
         puntos_validos = []
@@ -119,26 +122,27 @@ if archivo:
 
         if len(puntos_validos) >= 2:
             st.divider()
+            km_totales = 0
             all_coords = []
-            colores_hex = ["#00FFCC", "#FF007F", "#FFD700", "#00BFFF", "#7CFC00"]
+            colores = ["#00FFCC", "#FF007F", "#FFD700", "#00BFFF", "#7CFC00"]
             
             for i in range(len(puntos_validos)-1):
                 p_orig, p_dest = puntos_validos[i], puntos_validos[i+1]
-                geom, km = obtener_ruta_mejorada(p_orig, p_dest)
+                geom, km = obtener_ruta_osrm(p_orig, p_dest)
+                km_totales += km
                 all_coords.extend(geom)
-                c = colores_hex[i % len(colores_hex)]
+                c = colores[i % len(colores)]
                 
-                # Análisis de Alertas
+                # Motor de Alertas
                 alerta_html = ""
-                # 1. Alerta de Caceríos (si algún punto de la ruta está a menos de 1.5km de un cacerío)
-                for cac_nombre, cac_coords in CACERIOS.items():
-                    pasa_cerca = any(haversine_dist(g[0], g[1], cac_coords['lat'], cac_coords['lon']) < 1.5 for g in geom)
-                    if pasa_cerca:
-                        alerta_html += f'<div class="alerta-seguridad alerta-cacerio"><i class="fa-solid fa-house-chimney"></i> PASO POR {cac_nombre}</div>'
+                # Caceríos (Radio extendido a 3km para asegurar detección)
+                for com, coord in COMUNIDADES.items():
+                    if any(haversine(g[0], g[1], coord['lat'], coord['lon']) < 3.0 for g in geom):
+                        alerta_html += f'<div class="alerta-box alerta-comunidad"><i class="fa-solid fa-people-group"></i> PASO POR {com}</div>'
                 
-                # 2. Alerta de Despine
+                # Despine (>30km)
                 if km > 30:
-                    alerta_html += '<div class="alerta-seguridad alerta-distancia"><i class="fa-solid fa-triangle-exclamation"></i> DESPINAR TORRE (>30 KM)</div>'
+                    alerta_html += '<div class="alerta-box alerta-despine"><i class="fa-solid fa-truck-moving"></i> DESPINAR TORRE (>30 KM)</div>'
                 
                 st.markdown(f"""
                 <div class="tramo-card" style="border-left-color: {c};">
@@ -147,29 +151,30 @@ if archivo:
                     <span class="tramo-distancia" style="color:{c};">{km:.2f} KM</span>
                     {alerta_html}
                 </div>""", unsafe_allow_html=True)
+            
+            st.metric("DISTANCIA TOTAL", f"{km_totales:.2f} KM")
 
     with col_map:
         if len(puntos_validos) >= 2:
             m = folium.Map(tiles=None)
-            folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Híbrido').add_to(m)
+            folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Satélite').add_to(m)
             
-            # Dibujar Rutas
             for i in range(len(puntos_validos)-1):
-                geom, _ = obtener_ruta_mejorada(puntos_validos[i], puntos_validos[i+1])
-                folium.PolyLine(geom, color=colores_hex[i % len(colores_hex)], weight=5, opacity=0.8).add_to(m)
+                geom, _ = obtener_ruta_osrm(puntos_validos[i], puntos_validos[i+1])
+                c = colores[i % len(colores)]
+                folium.PolyLine(geom, color=c, weight=5, opacity=0.75).add_to(m)
             
-            # Dibujar Caceríos como puntos de advertencia en el mapa
-            for cac_nombre, cac_coords in CACERIOS.items():
-                folium.CircleMarker([cac_coords['lat'], cac_coords['lon']], radius=15, color='orange', fill=True, popup=cac_nombre).add_to(m)
-            
-            # Marcadores de Pozos
+            # Marcadores Profesionales con nombre de pozo
             for p in puntos_validos:
-                c = colores_hex[(p['id']-1) % len(colores_hex)]
-                lbl = f'<div style="background:{c}; color:black; border-radius:50%; width:24px; height:24px; line-height:24px; text-align:center; font-weight:bold; border:2px solid white;">{p['id']}</div>'
-                folium.Marker([p['lat'], p['lon']], icon=DivIcon(html=lbl, icon_anchor=(12, 12))).add_to(m)
+                c = colores[(p['id']-1) % len(colores)]
+                html = f"""<div style="text-align: center;">
+                            <div style="background:{c}; color:black; border-radius:50%; width:22px; height:22px; line-height:22px; font-weight:bold; border:2px solid white; font-size:9pt;">{p['id']}</div>
+                            <div style="background:rgba(14,17,23,0.85); color:white; padding:2px 6px; border-radius:4px; font-size:8pt; margin-top:3px; border:1px solid {c};">{p['n']}</div>
+                          </div>"""
+                folium.Marker([p['lat'], p['lon']], icon=DivIcon(html=html, icon_anchor=(11,11))).add_to(m)
             
             if all_coords:
-                m.fit_bounds([[min(p[0] for p in all_coords), min(p[1] for p in all_coords)],
-                             [max(p[0] for p in all_coords), max(p[1] for p in all_coords)]])
+                sw, ne = [min(p[0] for p in all_coords), min(p[1] for p in all_coords)], [max(p[0] for p in all_coords), max(p[1] for p in all_coords)]
+                m.fit_bounds([sw, ne])
             
             st_folium(m, width="100%", height=700)
