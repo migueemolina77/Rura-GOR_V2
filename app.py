@@ -8,7 +8,7 @@ import math
 from folium.features import DivIcon
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="MAPA GOR - ECOPETROL", layout="wide", page_icon="🦎")
+st.set_page_config(page_title="MAPA POZOS GOR - ECOPETROL", layout="wide", page_icon="🦎")
 
 # Estilo CSS para limpieza absoluta y profesionalismo (Versión Clean)
 st.markdown("""
